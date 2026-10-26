@@ -1,0 +1,358 @@
+
+import streamlit as st
+import pandas as pd
+
+from exam_app.db import (
+    init_db, authenticate, create_user, list_exams,
+    add_question, get_questions, save_attempt,
+    list_results, get_student_attempt, create_exam
+)
+from exam_app.security import hash_password
+
+st.set_page_config(
+    page_title="ExamDesk",
+    page_icon="📝",
+    layout="wide"
+)
+
+init_db()
+
+st.title("📝 ExamDesk")
+st.caption("Online Examination System")
+
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+
+def logout():
+    st.session_state.user = None
+    st.rerun()
+
+
+# LOGIN AND REGISTRATION
+if not st.session_state.user:
+    login_tab, register_tab = st.tabs(
+        ["Login", "Student Registration"]
+    )
+
+    with login_tab:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input(
+                "Password", type="password"
+            )
+            submitted = st.form_submit_button("Login")
+
+        if submitted:
+            user = authenticate(username.strip(), password)
+
+            if user:
+                st.session_state.user = user
+                st.rerun()
+            else:
+                st.error("Invalid username or password.")
+
+    with register_tab:
+        with st.form("register_form"):
+            new_username = st.text_input("Choose username")
+            new_password = st.text_input(
+                "Choose password", type="password"
+            )
+            confirm_password = st.text_input(
+                "Confirm password", type="password"
+            )
+            registered = st.form_submit_button(
+                "Create Account"
+            )
+
+        if registered:
+            if len(new_username.strip()) < 3:
+                st.error("Username must have at least 3 characters.")
+            elif len(new_password) < 8:
+                st.error("Password must have at least 8 characters.")
+            elif new_password != confirm_password:
+                st.error("Passwords do not match.")
+            elif create_user(
+                new_username.strip(),
+                hash_password(new_password),
+                "student"
+            ):
+                st.success("Account created. Please log in.")
+            else:
+                st.error("Username already exists.")
+
+    st.info(
+        "Demo admin: admin / AdminPass123! "
+        "Change this credential before deployment."
+    )
+    st.stop()
+
+
+user = st.session_state.user
+
+with st.sidebar:
+    st.write(f"**User:** {user['username']}")
+    st.write(f"**Role:** {user['role']}")
+    st.button("Logout", on_click=logout)
+
+
+# ADMIN DASHBOARD
+if user["role"] == "admin":
+
+    overview, create_tab, questions_tab, results_tab = st.tabs(
+        ["Overview", "Create Exam", "Question Bank", "Results"]
+    )
+
+    with overview:
+        exams = list_exams()
+
+        col1, col2 = st.columns(2)
+        col1.metric("Total Exams", len(exams))
+        col2.metric("Total Questions", len(get_questions()))
+
+        if exams:
+            st.dataframe(
+                [
+                    {
+                        "ID": exam["id"],
+                        "Title": exam["title"],
+                        "Duration": exam["duration"],
+                        "Questions": exam["question_count"]
+                    }
+                    for exam in exams
+                ],
+                use_container_width=True
+            )
+        else:
+            st.info("Create your first examination.")
+
+    with create_tab:
+        st.subheader("Create an Examination")
+
+        with st.form("create_exam_form"):
+            title = st.text_input("Exam Title")
+            description = st.text_area("Instructions")
+            duration = st.number_input(
+                "Duration (minutes)",
+                min_value=1,
+                max_value=300,
+                value=30
+            )
+            total_marks = st.number_input(
+                "Maximum Marks",
+                min_value=1,
+                max_value=500,
+                value=10
+            )
+            create_button = st.form_submit_button("Create Exam")
+
+        if create_button:
+            if title.strip():
+                exam_id = create_exam(
+                    title.strip(),
+                    description.strip(),
+                    int(duration),
+                    int(total_marks)
+                )
+                st.success(f"Exam created successfully. ID: {exam_id}")
+            else:
+                st.error("Enter an exam title.")
+
+    with questions_tab:
+        st.subheader("Add Multiple-Choice Questions")
+
+        exams = list_exams()
+
+        if not exams:
+            st.warning("Create an exam first.")
+        else:
+            exam_map = {
+                f"#{e['id']} — {e['title']}": e["id"]
+                for e in exams
+            }
+
+            selected_exam = st.selectbox(
+                "Select Examination",
+                list(exam_map.keys())
+            )
+            exam_id = exam_map[selected_exam]
+
+            with st.form("add_question_form"):
+                prompt = st.text_area("Question")
+                option_a = st.text_input("Option A")
+                option_b = st.text_input("Option B")
+                option_c = st.text_input("Option C")
+                option_d = st.text_input("Option D")
+
+                correct = st.selectbox(
+                    "Correct Answer",
+                    ["A", "B", "C", "D"]
+                )
+
+                marks = st.number_input(
+                    "Marks",
+                    min_value=1,
+                    max_value=20,
+                    value=1
+                )
+
+                add_button = st.form_submit_button(
+                    "Add Question"
+                )
+
+            if add_button:
+                options = [
+                    option_a, option_b, option_c, option_d
+                ]
+
+                if not prompt.strip() or any(
+                    not option.strip() for option in options
+                ):
+                    st.error("Fill in the question and all four options.")
+                else:
+                    add_question(
+                        exam_id,
+                        prompt.strip(),
+                        options,
+                        correct,
+                        int(marks)
+                    )
+                    st.success("Question added successfully.")
+
+            questions = get_questions(exam_id)
+            st.write(f"Questions in this exam: {len(questions)}")
+
+            for index, question in enumerate(questions, start=1):
+                st.write(
+                    f"{index}. {question['prompt']} "
+                    f"({question['marks']} mark(s))"
+                )
+
+    with results_tab:
+        st.subheader("Examination Results")
+
+        results = list_results()
+
+        if results:
+            df = pd.DataFrame(results)
+            st.dataframe(df, use_container_width=True)
+
+            st.download_button(
+                "Download Results CSV",
+                data=df.to_csv(index=False),
+                file_name="exam_results.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info("No examination attempts submitted yet.")
+
+
+# STUDENT DASHBOARD
+else:
+    st.header(f"Welcome, {user['username']}")
+
+    exam_tab, history_tab = st.tabs(
+        ["Available Exams", "My Results"]
+    )
+
+    with exam_tab:
+        exams = list_exams()
+
+        if not exams:
+            st.info("No examinations are available yet.")
+
+        for exam in exams:
+            with st.expander(
+                f"{exam['title']} | {exam['duration']} minutes"
+            ):
+                st.write(exam["description"] or "Answer all questions.")
+
+                questions = get_questions(exam["id"])
+
+                if not questions:
+                    st.warning("This examination has no questions.")
+                    continue
+
+                previous = get_student_attempt(
+                    user["id"], exam["id"]
+                )
+
+                if previous:
+                    st.info(
+                        f"You already submitted this exam. "
+                        f"Score: {previous['score']}/"
+                        f"{previous['max_score']} "
+                        f"({previous['percentage']:.1f}%)."
+                    )
+                    continue
+
+                with st.form(f"exam_form_{exam['id']}"):
+                    answers = {}
+
+                    for index, question in enumerate(
+                        questions, start=1
+                    ):
+                        st.markdown(
+                            f"**Q{index}. {question['prompt']}**"
+                        )
+                        st.caption(
+                            f"{question['marks']} mark(s)"
+                        )
+
+                        options = [
+                            question["option_a"],
+                            question["option_b"],
+                            question["option_c"],
+                            question["option_d"]
+                        ]
+
+                        answers[question["id"]] = st.radio(
+                            "Choose an answer",
+                            options,
+                            index=None,
+                            key=f"answer_{question['id']}",
+                            label_visibility="collapsed"
+                        )
+
+                    submit_exam = st.form_submit_button(
+                        "Submit Examination"
+                    )
+
+                if submit_exam:
+                    try:
+                        score, max_score, _ = save_attempt(
+                            user["id"],
+                            exam["id"],
+                            answers
+                        )
+
+                        percentage = (
+                            score / max_score * 100
+                            if max_score else 0
+                        )
+
+                        st.success(
+                            f"Submitted! Your score is "
+                            f"{score}/{max_score} "
+                            f"({percentage:.1f}%)."
+                        )
+                        st.rerun()
+
+                    except ValueError as error:
+                        st.error(str(error))
+
+                    except Exception:
+                        st.error(
+                            "Submission failed. Please try again."
+                        )
+
+    with history_tab:
+        results = list_results(student_id=user["id"])
+
+        if results:
+            st.dataframe(
+                pd.DataFrame(results),
+                use_container_width=True
+            )
+        else:
+            st.info("You have not submitted any examinations.")
